@@ -1,0 +1,15 @@
+.Rhistory
+.RData
+.Rproj.user/
+.DS_Store
+Thumbs.db
+
+analysis/*_files/
+analysis/*.html
+analysis/*.pdf
+reports/archive/original-files/
+
+*.log
+*.aux
+*.out
+*.toc

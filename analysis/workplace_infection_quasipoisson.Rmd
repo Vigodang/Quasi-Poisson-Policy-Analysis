@@ -1,0 +1,206 @@
+---
+title: "Quasi-Poisson Policy Analysis of Workplace Respiratory Infections"
+author: "Truong Lieu Dong Dang"
+date: "2026-07-18"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: readable
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center"
+)
+```
+
+## Executive Summary
+
+This project analyses aggregated workplace respiratory infection data from a hospital network. The objective is to identify which operational factors are associated with lower infection rates after accounting for different levels of work exposure.
+
+The response variable is a count of infections, so the analysis starts with a Poisson generalised linear model. Because each record represents a different number of worked hours, the model includes `log(hours)` as an offset. A goodness-of-fit check shows severe overdispersion, so the final inference uses a Quasi-Poisson model with corrected standard errors.
+
+The final model indicates that nursing experience is the dominant predictor. Compared with Experience Level 1, Experience Levels 2, 3, and 4 are associated with substantially lower infection rates. PPE regime, wage-increase coverage, and external training coverage do not provide meaningful additional explanatory value after experience is included.
+
+## Data Preparation
+
+```{r data-preparation}
+library(tidyverse)
+library(ggpubr)
+
+infections <- read.csv("../data/infections.csv", header = TRUE)
+
+infections <- infections %>%
+  mutate(
+    ppe_regime = factor(ppe_regime, levels = 1:4),
+    experience = factor(experience, levels = 1:4),
+    infection_rate = infections / hours * 1000
+  )
+
+summary(infections)
+sum(is.na(infections))
+```
+
+The derived `infection_rate` variable represents infections per 1,000 worked hours. It is used for descriptive visualisation, while the count model uses raw infection counts with an exposure offset.
+
+## Exploratory Analysis
+
+```{r eda-plots, fig.width=10, fig.height=8}
+plot_ppe <- ggplot(infections, aes(x = ppe_regime, y = infection_rate, fill = ppe_regime)) +
+  geom_boxplot(alpha = 0.75, outlier.colour = "#B42318", outlier.shape = 16) +
+  labs(
+    title = "Infection Rate by PPE Regime",
+    x = "PPE regime",
+    y = "Infections per 1,000 hours"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+plot_experience <- ggplot(infections, aes(x = experience, y = infection_rate, fill = experience)) +
+  geom_boxplot(alpha = 0.75, outlier.colour = "#B42318", outlier.shape = 16) +
+  labs(
+    title = "Infection Rate by Experience Level",
+    x = "Experience level",
+    y = "Infections per 1,000 hours"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+plot_wage <- ggplot(infections, aes(x = wage_inc, y = infection_rate)) +
+  geom_point(colour = "#1F4E79", alpha = 0.65) +
+  geom_smooth(method = "lm", se = TRUE, colour = "#B42318", linetype = "dashed") +
+  labs(
+    title = "Wage-Increase Coverage",
+    x = "Proportion receiving wage increase",
+    y = "Infections per 1,000 hours"
+  ) +
+  theme_minimal()
+
+plot_training <- ggplot(infections, aes(x = training, y = infection_rate)) +
+  geom_point(colour = "#246B45", alpha = 0.65) +
+  geom_smooth(method = "lm", se = TRUE, colour = "#B42318", linetype = "dashed") +
+  labs(
+    title = "External Training Coverage",
+    x = "Proportion completing external training",
+    y = "Infections per 1,000 hours"
+  ) +
+  theme_minimal()
+
+ggarrange(plot_ppe, plot_experience, plot_wage, plot_training, ncol = 2, nrow = 2)
+```
+
+The descriptive plots suggest that infection rates decline as experience increases. PPE regime appears to differ in the raw plots, but this pattern must be tested in a multivariable model because PPE allocation may be correlated with experience mix. Wage-increase and training coverage do not show strong linear relationships with infection rates in the exploratory plots.
+
+## Modelling Strategy
+
+The initial Poisson model is:
+
+```{r poisson-model}
+poisson_model <- glm(
+  infections ~ ppe_regime + experience + wage_inc + training,
+  offset = log(hours),
+  family = poisson(link = "log"),
+  data = infections
+)
+
+summary(poisson_model)
+
+gof_p_value <- pchisq(
+  poisson_model$deviance,
+  df = poisson_model$df.residual,
+  lower.tail = FALSE
+)
+
+dispersion_ratio <- poisson_model$deviance / poisson_model$df.residual
+overdispersion_threshold <- 1 + 3 * sqrt(2 / poisson_model$df.residual)
+
+tibble(
+  goodness_of_fit_p_value = gof_p_value,
+  dispersion_ratio = dispersion_ratio,
+  overdispersion_threshold = overdispersion_threshold,
+  overdispersed = dispersion_ratio > overdispersion_threshold
+)
+```
+
+The dispersion ratio is well above the overdispersion threshold, so standard Poisson uncertainty is too narrow. The final inference therefore uses a Quasi-Poisson model.
+
+```{r quasipoisson-full}
+full_quasi_model <- glm(
+  infections ~ ppe_regime + experience + wage_inc + training,
+  offset = log(hours),
+  family = quasipoisson(link = "log"),
+  data = infections
+)
+
+summary(full_quasi_model)
+drop1(full_quasi_model, test = "F")
+```
+
+## Covariate Selection
+
+Backward elimination is performed with F-tests because quasi-likelihood models do not produce a standard AIC.
+
+```{r model-selection}
+without_training <- update(full_quasi_model, . ~ . - training)
+anova(without_training, full_quasi_model, test = "F")
+
+without_ppe <- update(without_training, . ~ . - ppe_regime)
+anova(without_ppe, without_training, test = "F")
+
+final_model <- update(without_ppe, . ~ . - wage_inc)
+anova(final_model, without_ppe, test = "F")
+
+summary(final_model)
+```
+
+After accounting for experience, the other covariates do not improve model fit enough to justify retaining them. The final model is:
+
+```{r final-model-irr}
+coef_table <- cbind(
+  estimate = coef(final_model),
+  confint.default(final_model)
+)
+
+irr_table <- round(exp(coef_table), 3)
+irr_table
+```
+
+## Interpretation
+
+The final model estimates infection-rate ratios relative to Experience Level 1:
+
+- Experience Level 2: approximately 58% lower infection rate.
+- Experience Level 3: approximately 57% lower infection rate.
+- Experience Level 4: approximately 75% lower infection rate.
+
+These results support a practical policy interpretation: workforce experience and retention should be treated as central infection-control assets, not merely staffing variables.
+
+## Diagnostics
+
+```{r diagnostics, fig.width=10, fig.height=8}
+par(mfrow = c(2, 2))
+plot(final_model)
+par(mfrow = c(1, 1))
+
+standardised_residuals <- rstandard(final_model)
+which(abs(standardised_residuals) > 1.96)
+```
+
+The final diagnostic plots should be read in the context of count data and substantial overdispersion. The Quasi-Poisson model corrects the main uncertainty issue, and no single operational recommendation should be made from an individual observation alone.
+
+## Recommendations
+
+1. Prioritise retention of experienced nursing staff as an infection-control strategy.
+2. Pair less experienced nurses with senior mentors in high-risk units.
+3. Review PPE policy as part of a broader system, rather than selecting one PPE regime based only on raw infection rates.
+4. Reassess external training content and uptake measurement, since training coverage alone does not explain lower infection rates in this dataset.
+
+## Limitations
+
+This is an observational analysis of aggregated records. The findings should not be interpreted as individual-level causality. Important unmeasured factors, such as patient load, ward acuity, shift patterns, and local outbreak intensity, may also influence infection rates.
